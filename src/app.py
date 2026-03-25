@@ -20,6 +20,12 @@ from src.models import (
     EmbeddingsResponse,
     HealthResponse,
     ModelInfo,
+    OpenAIEmbeddingRequest,
+    OpenAIEmbeddingObject,
+    OpenAIEmbeddingUsage,
+    OpenAIEmbeddingResponse,
+    OpenAIModelObject,
+    OpenAIModelsResponse,
 )
 
 # Configure logging
@@ -38,15 +44,14 @@ load_dotenv()
 
 # Configuration from environment
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-Embedding-0.6B")
-# Expand ~ to actual home directory path
 if MODEL_NAME.startswith("~"):
     MODEL_NAME = os.path.expanduser(MODEL_NAME)
-# If running in Docker, map /root/models to ~/models
-if os.path.exists("/.dockerenv") and MODEL_NAME.startswith("/root/models"):
-    pass # Already set correctly for docker volume mount
-elif MODEL_NAME.startswith("/home/ubuntu/models"):
-    # Fix for common ubuntu path if needed
-    pass
+
+# Local model path: if set and the directory exists, load from disk instead of downloading
+LOCAL_MODEL_PATH = os.getenv("LOCAL_MODEL_PATH", "").strip()
+if LOCAL_MODEL_PATH.startswith("~"):
+    LOCAL_MODEL_PATH = os.path.expanduser(LOCAL_MODEL_PATH)
+LOCAL_MODEL_PATH = LOCAL_MODEL_PATH or None  # normalize empty string → None
 
 DEVICE = os.getenv("DEVICE", None)  # Auto-detect if None
 CACHE_FOLDER = os.getenv("HF_HOME", None)  # HuggingFace cache folder
@@ -64,7 +69,8 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info("Starting Qwen Embedding Service...")
-    logger.info(f"Model: {MODEL_NAME}")
+    logger.info(f"Local model path: {LOCAL_MODEL_PATH or '(not set, will download)'}")
+    logger.info(f"Model (HuggingFace fallback): {MODEL_NAME}")
     logger.info(f"Device: {DEVICE or 'auto'}")
     logger.info(f"Cache folder: {CACHE_FOLDER or 'default'}")
 
@@ -74,6 +80,7 @@ async def lifespan(app: FastAPI):
         device=DEVICE,
         normalize_embeddings=NORMALIZE_EMBEDDINGS,
         cache_folder=CACHE_FOLDER,
+        local_model_path=LOCAL_MODEL_PATH,
     )
 
     # Pre-load model
@@ -278,6 +285,76 @@ async def encode_query(query: str):
         raise HTTPException(status_code=500, detail=f"Query encoding failed: {str(e)}")
 
 
+# ---------------------------------------------------------------------------
+# OpenAI-compatible endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/models", response_model=OpenAIModelsResponse, tags=["OpenAI"])
+async def openai_list_models():
+    """OpenAI-compatible model listing endpoint."""
+    import time as _time
+    model_id = embedding_model.model_name if embedding_model else MODEL_NAME
+    return OpenAIModelsResponse(
+        object="list",
+        data=[
+            OpenAIModelObject(
+                id=model_id,
+                object="model",
+                created=int(_time.time()),
+                owned_by="local",
+            )
+        ],
+    )
+
+
+@app.post("/v1/embeddings", response_model=OpenAIEmbeddingResponse, tags=["OpenAI"])
+async def openai_embeddings(request: OpenAIEmbeddingRequest):
+    """
+    OpenAI-compatible embeddings endpoint.
+
+    Accepts a single string or an array of strings in **input**.
+    Returns embeddings in the same format as the OpenAI Embeddings API.
+    """
+    if embedding_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded yet")
+
+    if request.encoding_format != "float":
+        raise HTTPException(
+            status_code=400,
+            detail=f"encoding_format '{request.encoding_format}' is not supported. Only 'float' is supported.",
+        )
+
+    texts = request.input if isinstance(request.input, list) else [request.input]
+    if not texts or any(not t for t in texts):
+        raise HTTPException(status_code=400, detail="'input' must not be empty.")
+
+    try:
+        embeddings = embedding_model.encode(texts, batch_size=BATCH_SIZE)
+        # encode() returns List[float] for a single text; wrap it
+        if isinstance(embeddings[0], float):
+            embeddings = [embeddings]
+
+        total_chars = sum(len(t) for t in texts)
+        total_tokens = max(1, int(total_chars / 4))
+
+        return OpenAIEmbeddingResponse(
+            object="list",
+            data=[
+                OpenAIEmbeddingObject(object="embedding", embedding=emb, index=i)
+                for i, emb in enumerate(embeddings)
+            ],
+            model=embedding_model.model_name,
+            usage=OpenAIEmbeddingUsage(
+                prompt_tokens=total_tokens,
+                total_tokens=total_tokens,
+            ),
+        )
+
+    except Exception as e:
+        logger.error(f"Error in /v1/embeddings: {e}")
+        raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
+
+
 @app.get("/", tags=["Root"])
 async def root():
     """Root endpoint with API information"""
@@ -292,6 +369,8 @@ async def root():
             "embeddings": "/embeddings",
             "similarity": "/similarity",
             "encode_query": "/encode-query",
+            "openai_models": "/v1/models",
+            "openai_embeddings": "/v1/embeddings",
             "docs": "/docs",
         },
     }
