@@ -21,18 +21,34 @@ class EmbeddingModel:
         device: Optional[str] = None,
         normalize_embeddings: bool = True,
         cache_folder: Optional[str] = None,
+        local_model_path: Optional[str] = None,
     ):
         """
         Initialize the embedding model.
 
         Args:
-            model_name: HuggingFace model identifier
+            model_name: HuggingFace model identifier (used only if local_model_path is absent)
             device: Device to run on ('cuda', 'cpu', 'mps'). Auto-detected if None.
             normalize_embeddings: Whether to normalize embeddings to unit length
-            cache_folder: Custom cache folder for model files
+            cache_folder: Custom cache folder for model files (HuggingFace download only)
+            local_model_path: Absolute path to a locally stored model directory.
+                              When provided and the path exists, the model is loaded from
+                              disk without any network access.
         """
-        self.model_name = model_name
         self.normalize_embeddings = normalize_embeddings
+        self._local_model_path = local_model_path
+
+        # Determine effective model source: local path takes priority
+        if local_model_path and os.path.isdir(local_model_path):
+            self.model_name = local_model_path
+            logger.info(f"Using local model path: {local_model_path}")
+        else:
+            if local_model_path:
+                logger.warning(
+                    f"LOCAL_MODEL_PATH '{local_model_path}' does not exist or is not a directory, "
+                    "falling back to HuggingFace download."
+                )
+            self.model_name = model_name
 
         # Auto-detect device
         if device is None:
@@ -47,20 +63,26 @@ class EmbeddingModel:
         self._model: Optional[SentenceTransformer] = None
         self._cache_folder = cache_folder
 
-        logger.info(f"EmbeddingModel initialized with model={model_name}, device={device}")
+        logger.info(f"EmbeddingModel initialized with model={self.model_name}, device={device}")
 
     @property
     def model(self) -> SentenceTransformer:
         """Lazy loading of the model"""
         if self._model is None:
-            logger.info(f"Loading model: {self.model_name}")
-            self._model = SentenceTransformer(
-                self.model_name,
+            local_only = self._local_model_path and os.path.isdir(self._local_model_path)
+            logger.info(
+                f"Loading model from {'local path' if local_only else 'HuggingFace'}: {self.model_name}"
+            )
+            kwargs: dict = dict(
                 device=self.device,
-                cache_folder=self._cache_folder,
                 trust_remote_code=True,
             )
-            logger.info(f"Model loaded successfully")
+            if local_only:
+                kwargs["local_files_only"] = True
+            else:
+                kwargs["cache_folder"] = self._cache_folder
+            self._model = SentenceTransformer(self.model_name, **kwargs)
+            logger.info("Model loaded successfully")
         return self._model
 
     def get_embedding_dim(self) -> int:
