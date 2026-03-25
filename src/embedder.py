@@ -1,10 +1,12 @@
 """
 Embedding service using Sentence Transformers with Qwen3-embedding-0.6B model
 """
+from __future__ import annotations
+
 import os
 import torch
 from sentence_transformers import SentenceTransformer
-from typing import List, Optional
+from typing import List, Optional, Union
 import logging
 
 logger = logging.getLogger(__name__)
