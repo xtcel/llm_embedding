@@ -1,0 +1,32 @@
+services:
+  qwen-embedding:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qwen-embedding-service
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_NAME=Qwen/Qwen3-Embedding-0.6B
+      - DEVICE=cuda
+      - NORMALIZE_EMBEDDINGS=true
+      - BATCH_SIZE=32
+      - HOST=0.0.0.0
+      - PORT=8000
+    volumes:
+      # Mount HuggingFace cache for persistent model storage
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
