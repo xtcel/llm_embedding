@@ -4,18 +4,15 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: qwen-embedding-service
+    env_file:
+      - .env
     ports:
-      - "8000:8000"
-    environment:
-      - MODEL_NAME=Qwen/Qwen3-Embedding-0.6B
-      - DEVICE=cuda
-      - NORMALIZE_EMBEDDINGS=true
-      - BATCH_SIZE=32
-      - HOST=0.0.0.0
-      - PORT=8000
+      - "${PORT:-8000}:${PORT:-8000}"
     volumes:
       # Mount HuggingFace cache for persistent model storage
       - ~/.cache/huggingface:/root/.cache/huggingface
+      # Mount local models if needed
+      - ~/models:/root/models
     deploy:
       resources:
         reservations:

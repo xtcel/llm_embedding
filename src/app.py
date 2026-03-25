@@ -10,6 +10,7 @@ from typing import List, Optional, Union
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
 
 from src.embedder import EmbeddingModel
 from src.models import (
@@ -32,10 +33,26 @@ logger = logging.getLogger(__name__)
 # Global model instance
 embedding_model: Optional[EmbeddingModel] = None
 
+# Load environment variables from .env file
+load_dotenv()
+
 # Configuration from environment
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-Embedding-0.6B")
+# Expand ~ to actual home directory path
+if MODEL_NAME.startswith("~"):
+    MODEL_NAME = os.path.expanduser(MODEL_NAME)
+# If running in Docker, map /root/models to ~/models
+if os.path.exists("/.dockerenv") and MODEL_NAME.startswith("/root/models"):
+    pass # Already set correctly for docker volume mount
+elif MODEL_NAME.startswith("/home/ubuntu/models"):
+    # Fix for common ubuntu path if needed
+    pass
+
 DEVICE = os.getenv("DEVICE", None)  # Auto-detect if None
 CACHE_FOLDER = os.getenv("HF_HOME", None)  # HuggingFace cache folder
+if CACHE_FOLDER and CACHE_FOLDER.startswith("~"):
+    CACHE_FOLDER = os.path.expanduser(CACHE_FOLDER)
+
 NORMALIZE_EMBEDDINGS = os.getenv("NORMALIZE_EMBEDDINGS", "true").lower() == "true"
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "32"))
 
