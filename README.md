@@ -236,29 +236,33 @@ docker compose up -d
 
 适用于在 Linux 服务器上将服务注册为系统守护进程，开机自启、崩溃自动重启。
 
-### 1. 确认项目路径与用户
+> **核心要点**：systemd 服务运行在无交互的 shell 环境中，`conda activate` / `source .venv/bin/activate` 等命令无效。正确做法是**直接使用虚拟环境内的可执行文件绝对路径**，或通过 `Environment=PATH=` 将虚拟环境注入到进程的 PATH 中。
+
+---
+
+### 方案一：uv 虚拟环境
+
+#### 1. 创建虚拟环境并安装依赖
 
 ```bash
-# 确认项目目录
-ls /opt/qwen-embedding   # 或你实际的部署路径
+cd /opt/qwen-embedding
 
-# 确认 Python / uvicorn 路径（使用 uv 虚拟环境时）
-which uvicorn
-# 例如：/opt/qwen-embedding/.venv/bin/uvicorn
+# 用 uv 创建 .venv 并同步依赖
+uv sync
+
+# 确认 uvicorn 路径
+/opt/qwen-embedding/.venv/bin/uvicorn --version
 ```
 
-### 2. 创建 systemd service 文件
+#### 2. 创建 service 文件
 
 ```bash
 sudo nano /etc/systemd/system/qwen-embedding.service
 ```
 
-写入以下内容（根据实际路径修改 `WorkingDirectory`、`ExecStart`、`User`）：
-
 ```ini
 [Unit]
-Description=Qwen3-Embedding API Service
-Documentation=https://github.com/QwenLM/Qwen3
+Description=Qwen3-Embedding API Service (uv venv)
 After=network.target
 Wants=network-online.target
 
@@ -268,25 +272,23 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/opt/qwen-embedding
 
-# 环境变量文件（与项目 .env 保持一致）
+# 将 .venv/bin 注入 PATH，使虚拟环境生效
+Environment=PATH=/opt/qwen-embedding/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+# 读取项目 .env 中的配置
 EnvironmentFile=/opt/qwen-embedding/.env
 
-# 使用 uv 虚拟环境中的 uvicorn
+# 直接调用虚拟环境内的 uvicorn，无需激活
 ExecStart=/opt/qwen-embedding/.venv/bin/uvicorn src.app:app \
     --host 0.0.0.0 \
     --port 8000 \
     --workers 1
 
-# 崩溃后自动重启，间隔 5 秒
 Restart=on-failure
 RestartSec=5s
-
-# 日志输出到 journald
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=qwen-embedding
-
-# 安全加固（可选）
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -294,7 +296,77 @@ PrivateTmp=true
 WantedBy=multi-user.target
 ```
 
-> **注意**：embedding 模型首次加载需要较长时间，`Type=simple` 下 systemd 不会等待模型加载完成即认为服务已就绪，这是正常行为。可通过 `journalctl` 观察实际加载状态。
+---
+
+### 方案二：conda 虚拟环境
+
+#### 1. 创建 conda 环境并安装依赖
+
+```bash
+# 创建环境
+conda create -n qwen-embedding python=3.10 -y
+conda activate qwen-embedding
+
+# 安装依赖
+pip install -e /opt/qwen-embedding
+
+# 确认 conda 环境中的 uvicorn 路径
+which uvicorn
+# 示例输出：/opt/conda/envs/qwen-embedding/bin/uvicorn
+```
+
+#### 2. 创建 service 文件
+
+```bash
+sudo nano /etc/systemd/system/qwen-embedding.service
+```
+
+```ini
+[Unit]
+Description=Qwen3-Embedding API Service (conda)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/qwen-embedding
+
+# 将 conda 环境的 bin 目录置于 PATH 最前，覆盖系统 Python
+Environment=PATH=/opt/conda/envs/qwen-embedding/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+# conda 环境根目录（部分库通过此变量定位资源）
+Environment=CONDA_PREFIX=/opt/conda/envs/qwen-embedding
+
+# 读取项目 .env 中的配置
+EnvironmentFile=/opt/qwen-embedding/.env
+
+# 直接调用 conda 环境内的 uvicorn
+ExecStart=/opt/conda/envs/qwen-embedding/bin/uvicorn src.app:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers 1
+
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qwen-embedding
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+> **conda 路径说明**：默认安装路径为 `/opt/conda`（Miniconda/Anaconda 常见路径）。若你的安装路径不同，用以下命令确认：
+> ```bash
+> conda info --envs
+> # 输出示例：qwen-embedding  /home/ubuntu/miniconda3/envs/qwen-embedding
+> ```
+> 将 service 文件中的 `/opt/conda/envs/qwen-embedding` 替换为实际路径。
+
+---
 
 ### 3. 启用并启动服务
 
@@ -328,7 +400,7 @@ sudo journalctl -u qwen-embedding --since "2026-03-25 08:00:00"
 ### 5. 常用管理命令
 
 ```bash
-# 重启服务（如更新代码后）
+# 重启服务（更新代码或修改 .env 后）
 sudo systemctl restart qwen-embedding
 
 # 停止服务
@@ -336,9 +408,6 @@ sudo systemctl stop qwen-embedding
 
 # 禁用开机自启
 sudo systemctl disable qwen-embedding
-
-# 重新加载配置文件（修改 .env 后）
-sudo systemctl restart qwen-embedding
 ```
 
 ### 6. 使用本地模型（离线部署）
@@ -374,10 +443,16 @@ Model loaded successfully
 若服务器安装了 NVIDIA GPU，需确保：
 
 1. 已安装 NVIDIA 驱动和 CUDA
-2. `torch` 安装的是 CUDA 版本
+2. 虚拟环境中安装的是 CUDA 版本的 `torch`
 3. `.env` 中设置 `DEVICE=cuda`
 
 ```bash
-# 验证 GPU 可用
-python -c "import torch; print(torch.cuda.is_available())"
+# 验证 GPU 可用（使用对应虚拟环境的 Python）
+# uv:
+/opt/qwen-embedding/.venv/bin/python -c "import torch; print(torch.cuda.is_available())"
+
+# conda:
+/opt/conda/envs/qwen-embedding/bin/python -c "import torch; print(torch.cuda.is_available())"
 ```
+
+> **注意**：embedding 模型首次加载需要较长时间，`Type=simple` 下 systemd 不会等待模型加载完毕才报告 active 状态，这是正常行为。通过 `journalctl -u qwen-embedding -f` 观察 `Model loaded successfully` 日志确认服务就绪。
